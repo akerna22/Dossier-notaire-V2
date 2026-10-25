@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dossier parcellaire</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#1b2a3d;display:grid;grid-template-columns:400px 1fr;height:100vh}
+aside{padding:14px;overflow:auto;background:#f3f5f9;border-right:1px solid #d5dbe5}#map{height:100vh}
+h1{font-size:19px;color:#1f3a5f;margin:0 0 8px}h3{font-size:14px;margin:16px 0 6px;color:#1f3a5f}
+input,select{width:100%;padding:9px 10px;font-size:14px;border:1px solid #b8c2d0;border-radius:8px;background:#fff}
+.sg{position:relative}#list{position:absolute;left:0;right:0;background:#fff;border:1px solid #b8c2d0;border-radius:8px;z-index:1000;display:none}
+#list div{padding:8px 10px;cursor:pointer;font-size:13px}#list div:hover{background:#eaf0f8}
+button{padding:9px 12px;font-size:13px;background:#1f3a5f;color:#fff;border:0;border-radius:8px;cursor:pointer}button.alt{background:#fff;color:#1f3a5f;border:1px solid #1f3a5f}
+button:disabled{opacity:.45;cursor:not-allowed}.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.row{display:flex;gap:6px;margin-top:6px}
+.n{font-size:12px;color:#5b6b80}#msg{margin-top:8px;font-size:13px;min-height:18px}.err{color:#b42318}
+table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}td,th{border:1px solid #d5dbe5;padding:3px 5px;text-align:left}
+label{font-size:12px;color:#5b6b80;display:block;margin:6px 0 2px}
+@media(max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 60vh;height:auto}#map{height:60vh}}
+</style></head><body>
+<aside>
+<h1>Dossier parcellaire et urbanistique</h1>
+<div class="sg"><input id="q" placeholder="Adresse (ex : 12 rue des Érables, Lannion)" autocomplete="off"><div id="list"></div></div>
+<p class="n">1. Choisissez une adresse. 2. Cliquez sur les parcelles de la carte pour les sélectionner (re-cliquer pour retirer). Sans sélection, la parcelle de l'adresse est utilisée.</p>
+<h3>Parcelles sélectionnées</h3><div id="sel" class="n">Aucune.</div>
+<div class="row"><button class="alt" id="clr">Tout désélectionner</button></div>
+<h3>Estimation du prix au m² (DVF, 2 ans)</h3>
+<div class="grid"><div><label>Type de bien</label><select id="typ"><option>Maison</option><option>Appartement</option><option>Terrain</option></select></div>
+<div><label>Surface du bien (m²)</label><input id="sur" type="number" min="0" placeholder="ex : 95"></div>
+<div><label>Rayon de recherche</label><select id="rad"><option value="300">300 m</option><option value="500" selected>500 m</option><option value="1000">1 km</option><option value="2000">2 km</option><option value="5000">5 km</option></select></div>
+<div><label>Vue mer (%)</label><input id="a1" type="number" value="0"></div>
+<div><label>Proximité mer (%)</label><input id="a2" type="number" value="0"></div>
+<div><label>Autre ajustement (%)</label><input id="a3" type="number" value="0"></div></div>
+<p class="n">Les ajustements sont à votre appréciation : aucune source publique ne les fournit.</p>
+<div class="row"><button class="alt" id="est">Calculer l'estimation</button></div><div id="estr"></div>
+<h3>Générer un PDF</h3>
+<button id="p_global" style="width:100%" data-s="global">PDF global (tous les chapitres)</button>
+<div class="grid" style="margin-top:6px">
+<button class="alt" data-s="cadastre">Cadastre et cartes</button><button class="alt" data-s="urbanisme">Urbanisme et servitudes</button>
+<button class="alt" data-s="risques">Risques</button><button class="alt" data-s="environnement">Environnement</button>
+<button class="alt" data-s="littoral">Littoral, sites, mérule</button><button class="alt" data-s="marche">Estimation DVF</button></div>
+<div id="msg"></div>
+</aside><div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const map=L.map('map',{maxZoom:20}).setView([46.6,2.4],6);
+const wmts=(l,f)=>L.tileLayer(`https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${l}&STYLE=normal&FORMAT=${f}&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}`,{maxZoom:19,attribution:'© IGN'});
+const plan=wmts('GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2','image/png').addTo(map),ortho=wmts('ORTHOIMAGERY.ORTHOPHOTOS','image/jpeg');
+const pci=L.tileLayer.wms('https://data.geopf.fr/wms-r/wms',{layers:'CADASTRALPARCELS.PARCELLAIRE_EXPRESS',format:'image/png',transparent:true,version:'1.3.0',maxZoom:20});
+L.control.layers({'Plan IGN':plan,'Photo aérienne':ortho},{'Cadastre (tuiles IGN)':pci}).addTo(map);
+let place=null,marker=null,timer=null;const sel=new Map(),lay=new Map(),group=L.layerGroup().addTo(map);
+const sty=on=>on?{color:'#b8860b',weight:2,fillColor:'#e0b030',fillOpacity:.55}:{color:'#0f3d6e',weight:1.3,fillColor:'#0f3d6e',fillOpacity:.04};
+const label=p=>p.section+' '+String(p.numero).replace(/^0+/,'');
+function showSel(){const a=[...sel.values()];
+  $('sel').innerHTML=a.length?'<table><tr><th>Parcelle</th><th>m²</th></tr>'+a.map(f=>`<tr><td>${esc(label(f.properties))}</td><td>${f.properties.contenance}</td></tr>`).join('')+`<tr><th>Total</th><th>${a.reduce((s,f)=>s+(+f.properties.contenance||0),0)}</th></tr></table>`:'Aucune.'}
+function addParcel(f){const id=f.properties.idu;if(lay.has(id))return;
+  const l=L.geoJSON(f,{style:()=>sty(sel.has(id))}).addTo(group);l.bindTooltip(label(f.properties));
+  l.on('click',()=>{sel.has(id)?sel.delete(id):sel.set(id,f);l.setStyle(sty(sel.has(id)));showSel()});lay.set(id,l)}
+async function loadParcels(){if(map.getZoom()<17)return;const b=map.getBounds(),g={type:'Polygon',coordinates:[[[b.getWest(),b.getSouth()],[b.getEast(),b.getSouth()],[b.getEast(),b.getNorth()],[b.getWest(),b.getNorth()],[b.getWest(),b.getSouth()]]]};
+  try{const j=await (await fetch('https://apicarto.ign.fr/api/cadastre/parcelle?_limit=600&geom='+encodeURIComponent(JSON.stringify(g)))).json();
+    if(lay.size>1500){[...lay].forEach(([id,l])=>{if(!sel.has(id)){group.removeLayer(l);lay.delete(id)}})}(j.features||[]).forEach(addParcel)}catch(e){$('msg').innerHTML='<span class="err">Parcelles indisponibles (API Carto IGN).</span>'}}
+map.on('moveend',()=>{clearTimeout(timer);timer=setTimeout(loadParcels,300)});
+$('q').addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(async()=>{const v=$('q').value.trim();if(v.length<3){$('list').style.display='none';return}
+  try{const j=await (await fetch('https://api-adresse.data.gouv.fr/search/?limit=6&autocomplete=1&q='+encodeURIComponent(v))).json();$('list').innerHTML='';
+    (j.features||[]).forEach(f=>{const p=f.properties,d=document.createElement('div');d.innerHTML=esc(p.label)+' <span class="n">'+esc(p.context)+'</span>';
+      d.onclick=()=>choose({label:p.label,lon:f.geometry.coordinates[0],lat:f.geometry.coordinates[1],citycode:p.citycode,postcode:p.postcode,city:p.city,context:p.context});$('list').appendChild(d)});
+    $('list').style.display=j.features&&j.features.length?'block':'none'}catch(e){}},250)});
+function choose(p){place=p;$('q').value=p.label;$('list').style.display='none';sel.clear();showSel();lay.forEach(l=>group.removeLayer(l));lay.clear();
+  if(marker)map.removeLayer(marker);marker=L.marker([p.lat,p.lon]).addTo(map);map.setView([p.lat,p.lon],19)}
+$('clr').onclick=()=>{sel.clear();lay.forEach(l=>l.setStyle(sty(false)));showSel()};
+const body=s=>({place,section:s,features:[...sel.values()],est:estP()});
+const estP=()=>({type:$('typ').value,surface:$('sur').value,radius:$('rad').value,adj:{vue_mer:$('a1').value,proximite_mer:$('a2').value,autre:$('a3').value}});
+const post=async(u,b)=>{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||('Erreur '+r.status))}return r};
+document.querySelectorAll('button[data-s]').forEach(b=>b.onclick=async()=>{
+  if(!place){$('msg').innerHTML='<span class="err">Choisissez d\'abord une adresse.</span>';return}
+  document.querySelectorAll('button').forEach(x=>x.disabled=true);$('msg').className='';$('msg').textContent='Génération en cours (20 à 60 s)…';
+  try{const r=await post('/api/pdf',body(b.dataset.s)),u=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=u;a.download=b.dataset.s+'.pdf';a.click();
+    $('msg').innerHTML='PDF généré. <a href="'+u+'" target="_blank">Ouvrir</a>'}catch(e){$('msg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}
+  document.querySelectorAll('button').forEach(x=>x.disabled=false)});
+$('est').onclick=async()=>{if(!place){$('estr').innerHTML='<span class="err">Choisissez d\'abord une adresse.</span>';return}
+  $('estr').textContent='Chargement des ventes DVF (peut prendre 30 s)…';
+  try{const e=await (await post('/api/estimation',body('marche'))).json(),f=n=>Number(n).toLocaleString('fr-FR');
+    if(!e.n){$('estr').textContent='Aucune vente comparable : élargissez le rayon ou changez le type.';return}
+    let h=`<p><b>${e.n} ventes</b> (${e.type}, ${e.radius} m, 24 mois) · médiane <b>${f(e.median)} €/m²</b> · intervalle ${f(e.q1)} – ${f(e.q3)} €/m²</p>`;
+    if(e.n<5)h+='<p class="err">Échantillon faible : élargissez le rayon.</p>';
+    if(e.estimate)h+=`<p>Estimation ajustée (${e.coef>=1?'+':''}${Math.round((e.coef-1)*100)} %) : <b>${f(e.estimate)} €</b><br><span class="n">Fourchette ${f(e.low)} – ${f(e.high)} €</span></p>`;
+    h+='<table><tr><th>Date</th><th>Adresse</th><th>m²</th><th>€/m²</th><th>Dist.</th></tr>'+e.comps.slice(0,15).map(c=>`<tr><td>${c.date}</td><td>${esc(c.adresse)}</td><td>${c.surface}</td><td>${f(c.pm2)}</td><td>${c.dist}</td></tr>`).join('')+'</table>';$('estr').innerHTML=h}
+  catch(e){$('estr').innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
+</script></body></html>
